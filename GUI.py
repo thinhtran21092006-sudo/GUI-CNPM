@@ -102,7 +102,6 @@ def login():
         messagebox.showwarning("Thông báo", "\n".join(errors))
         return
 
-    # Ẩn cửa sổ đăng nhập thay vì hủy để tránh lỗi thread chính Tkinter bị tắt
     login_window.withdraw()
 
     if role == "Quản trị viên":
@@ -136,17 +135,110 @@ def open_account_management():
     for account in accounts:
         tree.insert("", tk.END, values=account)
 
+    def delete_account():
+        selected_items = tree.selection()
+        if not selected_items:
+            messagebox.showwarning("Cảnh báo", "Vui lòng chọn một tài khoản để xóa!")
+            return
+
+
+        confirm = messagebox.askyesno("Xác nhận", "Bạn có chắc chắn muốn xóa tài khoản này?")
+        if confirm:
+            for item in selected_items:
+                tree.delete(item)
+
+    def add_account():
+
+        add_win = tk.Toplevel(window)
+        add_win.title("Thêm tài khoản")
+        add_win.geometry("300x250")
+        add_win.grab_set()
+
+        tk.Label(add_win, text="Tên đăng nhập:").pack(pady=(10, 2))
+        entry_user = tk.Entry(add_win, width=30)
+        entry_user.pack()
+
+        tk.Label(add_win, text="Họ và tên:").pack(pady=(10, 2))
+        entry_name = tk.Entry(add_win, width=30)
+        entry_name.pack()
+
+        tk.Label(add_win, text="Vai trò:").pack(pady=(10, 2))
+
+        combo_role = ttk.Combobox(add_win, values=["Quản trị viên", "Giáo viên", "Học sinh"], state="readonly",
+                                  width=27)
+        combo_role.pack()
+        combo_role.current(1)
+
+        def save_new_account():
+            user = entry_user.get().strip()
+            name = entry_name.get().strip()
+            role = combo_role.get()
+
+
+            if not user or not name:
+                messagebox.showerror("Lỗi", "Vui lòng điền đầy đủ Tên đăng nhập và Họ tên!")
+                return
+
+
+            tree.insert(parent="", index=tk.END, values=(user, name, role))
+            messagebox.showinfo("Thành công", "Đã thêm tài khoản thành công!")
+            add_win.destroy()
+
+        tk.Button(add_win, text="Lưu thông tin", command=save_new_account, width=15, bg="#d4edda").pack(pady=20)
+
     action_frame = tk.Frame(window)
     action_frame.pack(pady=10)
-    tk.Button(action_frame, text="Thêm tài khoản", width=15, command=lambda: messagebox.showinfo("Thông báo", "Chức năng thêm tài khoản tạm thời chưa kích hoạt", parent=window)).grid(row=0, column=0, padx=6)
-    tk.Button(action_frame, text="Xóa tài khoản", width=15, command=lambda: messagebox.showinfo("Thông báo", "Chức năng xóa tài khoản tạm thời chưa kích hoạt", parent=window)).grid(row=0, column=1, padx=6)
+    tk.Button(action_frame, text="Thêm tài khoản", width=15, command=add_account).pack(side=tk.LEFT, padx=10)
+    tk.Button(action_frame, text="Xóa tài khoản", width=15, command=delete_account).pack(side=tk.LEFT, padx=10)
+
 
 def open_student_management():
     window = tk.Toplevel()
     window.title("Quản lý học sinh")
-    window.geometry("650x420")
+    window.geometry("650x500")
 
     tk.Label(window, text="QUẢN LÝ HỌC SINH", font=("Arial", 16, "bold")).pack(pady=12)
+
+    students = [
+        ("HS001", "Nguyễn Văn A", "12A1"),
+        ("HS002", "Trần Văn B", "12A2"),
+        ("HS003", "Lê Thị C", "11B1"),
+    ]
+
+    search_frame = tk.Frame(window)
+    search_frame.pack(pady=5, padx=20, fill="x")
+
+    tk.Label(search_frame, text="Nhập từ khóa:", font=("Arial", 10)).pack(side=tk.LEFT, padx=5)
+
+    entry_keyword = tk.Entry(search_frame, width=22, font=("Arial", 10))
+    entry_keyword.pack(side=tk.LEFT, padx=5)
+
+    def search_student():
+        keyword = entry_keyword.get().strip().lower()
+        for item in tree.get_children():
+            tree.delete(item)
+        for student in students:
+            if keyword in student[0].lower() or keyword in student[1].lower():
+                tree.insert(parent="", index=tk.END, values=student)
+
+    def filter_class():
+        keyword = entry_keyword.get().strip().lower()
+        for item in tree.get_children():
+            tree.delete(item)
+        for student in students:
+            if keyword in student[2].lower():
+                tree.insert(parent="", index=tk.END, values=student)
+
+    def reset_table():
+        entry_keyword.delete(0, tk.END)
+        for item in tree.get_children():
+            tree.delete(item)
+        for student in students:
+            tree.insert(parent="", index=tk.END, values=student)
+
+    tk.Button(search_frame, text="Tìm kiếm", command=search_student, width=10).pack(side=tk.LEFT, padx=4)
+    tk.Button(search_frame, text="Lọc theo Lớp", command=filter_class, width=12).pack(side=tk.LEFT, padx=4)
+    tk.Button(search_frame, text="Đặt lại", command=reset_table, width=10, bg="#f8d7da").pack(side=tk.LEFT, padx=4)
 
     columns = ("Mã HS", "Họ và tên", "Lớp")
     tree = ttk.Treeview(window, columns=columns, show="headings", height=10)
@@ -155,12 +247,8 @@ def open_student_management():
         tree.column(col, width=200)
     tree.pack(pady=10, padx=20, fill="x")
 
-    students = [("HS001", "Nguyễn Văn A", "12A1"),
-        ("HS002", "Trần Văn B", "12A2"),
-        ("HS003", "Lê Thị C", "11B1"),
-    ]
     for student in students:
-        tree.insert("", tk.END, values=student)
+        tree.insert(parent="", index=tk.END, values=student)
 
 def open_class_management():
     window = tk.Toplevel()
@@ -235,7 +323,7 @@ def open_admin_report():
         tree.insert("", tk.END, values=item)
 
 def open_admin_dashboard():
-    window = tk.Toplevel() # Đổi từ tk.Tk() thành tk.Toplevel() để tránh tạo thêm cửa sổ root mới
+    window = tk.Toplevel()
     window.title("Admin Dashboard")
     window.geometry("700x520")
     tk.Label(window, text="ADMIN DASHBOARD", font=("Arial", 18, "bold")).pack(pady=20)
@@ -248,7 +336,7 @@ def open_admin_dashboard():
     tk.Button(frame, text="Quản lý lớp học", width=30, height=2, command=open_class_management).pack(pady=5)
     tk.Button(frame, text="Phân công giáo viên", width=30, height=2, command=open_teacher_assignment).pack(pady=5)
     tk.Button(frame, text="Xem báo cáo tổng hợp", width=30, height=2, command=open_admin_report).pack(pady=5)
-    
+
     # Đồng bộ đóng ứng dụng khi tắt Dashboard
     window.protocol("WM_DELETE_WINDOW", login_window.quit)
 
@@ -355,7 +443,7 @@ def open_teacher_dashboard():
         tree.insert("", tk.END, values=s)
 
     tk.Button(window, text="Lưu điểm danh", bg="lightgreen", font=("Arial", 12, "bold"), command=save_attendance).pack(pady=10)
-    
+
     window.protocol("WM_DELETE_WINDOW", login_window.quit)
 
 # ===================== STUDENT =====================
@@ -374,8 +462,7 @@ def open_self_attendance():
     status_var = tk.StringVar(value="Có mặt")
     ttk.Combobox(window, textvariable=status_var, values=["Có mặt", "Vắng", "Muộn"], state="readonly", width=30).pack(padx=20, pady=10)
 
-    def save_self_attendance():
-        messagebox.showinfo("Thông báo", f"Bạn đã điểm danh: {status_var.get()}", parent=window)
+    def save_self_attendance():messagebox.showinfo("Thông báo", f"Bạn đã điểm danh: {status_var.get()}", parent=window)
 
     tk.Button(window, text="Gửi điểm danh", width=18, bg="lightgreen", font=("Arial", 12, "bold"), command=save_self_attendance).pack(pady=14)
 
@@ -413,7 +500,7 @@ def open_student_dashboard():
         tree.insert("", tk.END, values=item)
 
     tk.Button(window, text="Tự điểm danh", width=20, command=open_self_attendance).pack(pady=10)
-    
+
     window.protocol("WM_DELETE_WINDOW", login_window.quit)
 
 # ===================== CỬA SỔ ĐĂNG NHẬP =====================
