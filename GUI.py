@@ -113,12 +113,15 @@ def check_schema_ready() -> bool:
     return True
 
 
-def execute_query(query, params=None, fetch=False):
+def execute_query(query, params=None, fetch=False, is_many=False):
     """Thực hiện query sử dụng DatabaseManager."""
     with DatabaseManager() as db:
         if db:
             try:
-                return db.execute(query, params, fetch=fetch)
+                if is_many:
+                    return db.executemany(query, params)
+                else:
+                    return db.execute(query, params, fetch=fetch)
             except Error as e:
                 messagebox.showerror("Lỗi Database", str(e))
     return None
@@ -797,35 +800,54 @@ def open_class_management():
     action_frame.pack(pady=10)
     ui_button(action_frame, "Thêm lớp", add_class).pack(side=tk.LEFT, padx=5)
 
-    def delete_student():
-        """Xoá học sinh đang chọn (xử lý cả bảng liên quan: attendance, users)."""
+    def delete_class():
+        """Xoá lớp đang chọn và tất cả dữ liệu liên quan (học sinh, điểm danh, phân công...)."""
         selected = tree.selection()
         if not selected:
-            messagebox.showwarning("Cảnh báo", "Vui lòng chọn một học sinh để xoá!", parent=window)
+            messagebox.showwarning("Cảnh báo", "Vui lòng chọn một lớp để xoá!", parent=window)
             return
 
         confirm = messagebox.askyesno(
-            "Xác nhận",
-            "Bạn có chắc chắn muốn xoá học sinh này?\nToàn bộ bản ghi điểm danh liên quan cũng sẽ bị xoá.",
-            parent=window,
+            title="Xác nhận xoá",
+            message="CẢNH BÁO NGHIÊM TRỌNG:\nBạn có chắc chắn muốn xoá lớp này không?\n\n"
+                    "Hành động này sẽ xoá VĨNH VIỄN:\n"
+                    "• Toàn bộ tài khoản và thông tin học sinh trong lớp.\n"
+                    "• Toàn bộ lịch sử điểm danh của lớp.\n"
+                    "• Toàn bộ phân công giảng dạy liên quan đến lớp.\n\n"
+                    "Hành động này không thể hoàn tác.",
+            icon='warning',
+            parent=window
         )
         if not confirm:
             return
 
         for item in selected:
             values = tree.item(item, "values")
-            student_code = values[0]
-            info = execute_query("SELECT s.student_id, s.user_id FROM students s WHERE s.student_code = %s", (student_code,), fetch=True)
-            if info:
-                student_id, user_id = info[0]
-                execute_query("DELETE FROM attendance WHERE student_id = %s", (student_id,))
-                execute_query("DELETE FROM grades WHERE student_id = %s", (student_id,))
-                execute_query("DELETE FROM students WHERE student_id = %s", (student_id,))
-                execute_query("DELETE FROM users WHERE user_id = %s", (user_id,))
-                tree.delete(item)
-        messagebox.showinfo("Thành công", "Đã xoá học sinh thành công.", parent=window)
+            class_id = values[0]
+            class_name = values[1]
 
-    ui_button(action_frame, "Xoá học sinh", delete_student, bg="#f8d7da").pack(side=tk.LEFT, padx=5)
+            students_in_class = execute_query("SELECT student_id, user_id FROM students WHERE class_id = %s", (class_id,), fetch=True)
+            student_ids = [s[0] for s in students_in_class] if students_in_class else []
+            user_ids = [s[1] for s in students_in_class] if students_in_class else []
+
+            try:
+                with DatabaseManager() as db:
+                    if not db: continue
+                    if student_ids:
+                        db.execute(f"DELETE FROM attendance WHERE student_id IN ({','.join(['%s']*len(student_ids))})", student_ids)
+                        db.execute(f"DELETE FROM grades WHERE student_id IN ({','.join(['%s']*len(student_ids))})", student_ids)
+                    db.execute("DELETE FROM teaching_assignments WHERE class_id = %s", (class_id,))
+                    db.execute("DELETE FROM self_attendance_configs WHERE class_id = %s", (class_id,))
+                    db.execute("DELETE FROM students WHERE class_id = %s", (class_id,))
+                    if user_ids:
+                        db.execute(f"DELETE FROM users WHERE user_id IN ({','.join(['%s']*len(user_ids))})", user_ids)
+                    db.execute("DELETE FROM classes WHERE class_id = %s", (class_id,))
+                tree.delete(item)
+                messagebox.showinfo("Thành công", f"Đã xoá thành công lớp '{class_name}' và toàn bộ dữ liệu liên quan.", parent=window)
+            except Exception as e:
+                messagebox.showerror("Lỗi", f"Không thể xoá lớp '{class_name}': {e}", parent=window)
+
+    ui_button(action_frame, "Xoá lớp", delete_class, bg="#f8d7da").pack(side=tk.LEFT, padx=5)
 
 def open_teacher_assignment():
     window = create_window("Phân công giáo viên", "650x420")
@@ -1016,24 +1038,40 @@ def open_teacher_attendance(class_id, class_name, on_save_callback):
     status_vars = []
     if students_data:
         for index, (student_id, name, class_id) in enumerate(students_data):
+            options = ["Chưa điểm danh", "Có mặt", "Vắng mặt", "Muộn", "Có phép"]
             tk.Label(scrollable_frame, text=f"{index+1}. {name}", anchor="w", width=30).grid(row=index, column=0, sticky="w", pady=5, padx=5)
-            status_var = tk.StringVar(value="Có mặt")
+            status_var = tk.StringVar(value=options[0]) # Đặt "Chưa điểm danh" làm mặc định
             status_vars.append((student_id, class_id, status_var))
-            ttk.Combobox(scrollable_frame, textvariable=status_var, values=["Có mặt", "Vắng mặt", "Muộn", "Có phép"], state="readonly", width=15).grid(row=index, column=1, padx=5)
+            ttk.Combobox(scrollable_frame, textvariable=status_var, values=options, state="readonly", width=15).grid(row=index, column=1, padx=5)
 
     def save_teacher_attendance():
+        records_to_update = []
+        records_to_delete = []
+
         for student_id, class_id, status_var in status_vars:
             status = status_var.get()
-            query = """
-            INSERT INTO attendance (student_id, class_id, attendance_date, status, recorded_by)
-            VALUES (%s, %s, CURDATE(), %s, %s)
-            ON DUPLICATE KEY UPDATE status = VALUES(status)
-            """
-            execute_query(query, (student_id, class_id, status, current_user["user_id"]))
-
-        messagebox.showinfo("Thành công", f"Đã lưu điểm danh cho lớp {class_name}", parent=window)
-        if on_save_callback: on_save_callback()
-        window.destroy()
+            if status == "Chưa điểm danh":
+                records_to_delete.append(student_id)
+            else:
+                records_to_update.append((student_id, class_id, status, current_user["user_id"]))
+        try:
+            with DatabaseManager() as db:
+                if not db: return
+                if records_to_update:
+                    update_query = """
+                        INSERT INTO attendance (student_id, class_id, attendance_date, status, recorded_by)
+                        VALUES (%s, %s, CURDATE(), %s, %s)
+                        ON DUPLICATE KEY UPDATE status = VALUES(status), recorded_by = VALUES(recorded_by)
+                    """
+                    db.executemany(update_query, records_to_update)
+                if records_to_delete:
+                    delete_query = f"DELETE FROM attendance WHERE student_id IN ({','.join(['%s']*len(records_to_delete))}) AND attendance_date = CURDATE()"
+                    db.execute(delete_query, records_to_delete)
+            messagebox.showinfo("Thành công", f"Đã cập nhật điểm danh cho lớp {class_name}", parent=window)
+            if on_save_callback: on_save_callback()
+            window.destroy()
+        except Exception as e:
+            messagebox.showerror("Lỗi", f"Không thể lưu điểm danh: {e}", parent=window)
 
     tk.Button(window, text="Lưu điểm danh", bg="lightgreen", font=("Arial", 12, "bold"), command=save_teacher_attendance).pack(pady=12)
 
@@ -1170,11 +1208,15 @@ def open_self_attendance(auth_date, start_time, end_time, on_save_callback):
         tk.Label(window, text=f"Khung giờ: {auth_date} ({start_time} - {end_time})", fg="blue").pack(anchor="w", padx=20, pady=(5, 15))
 
         tk.Label(window, text="Trạng thái điểm danh:").pack(anchor="w", padx=20)
-        status_var = tk.StringVar(value="Có mặt")
+        status_var = tk.StringVar()
         ttk.Combobox(window, textvariable=status_var, values=["Có mặt", "Vắng mặt", "Muộn", "Có phép"], state="readonly", width=30).pack(padx=20, pady=10)
 
         def save_self_attendance():
             status = status_var.get()
+            if not status:
+                messagebox.showwarning("Thông báo", "Vui lòng chọn một trạng thái điểm danh!", parent=window)
+                return
+
             query = """
             INSERT INTO attendance (student_id, class_id, attendance_date, status, recorded_by)
             VALUES (%s, %s, %s, %s, %s)
@@ -1242,7 +1284,11 @@ def open_student_dashboard():
         SELECT DATE_FORMAT(conf.auth_date, %s), 
                TIME_FORMAT(conf.start_time, %s), 
                TIME_FORMAT(conf.end_time, %s), 
-               COALESCE(att.status, 'Chưa điểm danh')
+               CASE 
+                   WHEN att.status IS NOT NULL THEN att.status
+                   WHEN NOW() BETWEEN CONCAT(conf.auth_date, ' ', conf.start_time) AND CONCAT(conf.auth_date, ' ', conf.end_time) THEN 'Đang mở'
+                   ELSE 'Vắng mặt'
+               END AS display_status
         FROM self_attendance_configs conf
         JOIN students s ON s.class_id = conf.class_id
         LEFT JOIN attendance att ON att.student_id = s.student_id AND att.attendance_date = conf.auth_date
