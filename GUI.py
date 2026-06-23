@@ -5,6 +5,17 @@ from mysql.connector import Error
 from datetime import datetime
 import bcrypt
 import os
+import re
+
+def validate_email(email):
+    """Kiểm tra định dạng email cơ bản."""
+    pattern = r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$'
+    return re.match(pattern, email) is not None
+
+def validate_phone(phone):
+    """Kiểm tra số điện thoại (chỉ chứa số, từ 9-11 ký tự)."""
+    return phone.isdigit() and 9 <= len(phone) <= 11
+
 try:
     from dotenv import load_dotenv
     load_dotenv()
@@ -17,11 +28,11 @@ except ImportError:
 REQUIRED_TABLES = [
     "users", "roles", "students", "classes",
     "subjects", "attendance", "grades", "teaching_assignments",
-    "grade_levels",
+    "grade_levels", "self_attendance_configs"
 ]
 
 REQUIRED_SCHEMA_HINT = """
-Vui lòng chạy file setup_database.py để khởi tạo đầy đủ 9 bảng cần thiết trước khi khởi động ứng dụng.
+Vui lòng chạy file setup_database.py để khởi tạo đầy đủ 10 bảng cần thiết trước khi khởi động ứng dụng.
 """
 
 class DatabaseManager:
@@ -96,7 +107,7 @@ def check_schema_ready() -> bool:
         messagebox.showerror(
             "Thiếu bảng database",
             "Các bảng sau chưa tồn tại: " + ", ".join(sorted(missing)) +
-            "\n\nVui lòng chạy file schema.sql đính kèm trước khi sử dụng.\n\n" + REQUIRED_SCHEMA_HINT,
+            "\n\nVui lòng chạy file setup_database.py trước khi sử dụng.\n\n" + REQUIRED_SCHEMA_HINT,
         )
         return False
     return True
@@ -111,6 +122,30 @@ def execute_query(query, params=None, fetch=False):
             except Error as e:
                 messagebox.showerror("Lỗi Database", str(e))
     return None
+
+def create_window(title, geometry, resizable=False):
+    win = tk.Toplevel()
+    win.title(title)
+    win.geometry(geometry)
+    if resizable: win.grab_set()
+    return win
+
+def ui_label_entry(parent, label_text, show=None):
+    tk.Label(parent, text=label_text).pack(pady=(5, 0))
+    entry = tk.Entry(parent, width=30, show=show)
+    entry.pack(pady=5)
+    return entry
+
+def ui_treeview(parent, cols, col_widths):
+    tree = ttk.Treeview(parent, columns=cols, show="headings", height=10)
+    for col in cols:
+        tree.heading(col, text=col)
+        tree.column(col, width=col_widths.get(col, 150), anchor="center")
+    tree.pack(pady=10, padx=20, fill="x")
+    return tree
+
+def ui_button(parent, text, command, bg=None):
+    return tk.Button(parent, text=text, command=command, width=15, bg=bg)
 
 def run_transaction(statements):
     """Chạy nhiều câu lệnh trong cùng 1 transaction.
@@ -173,7 +208,7 @@ def login():
         return
 
     # Kiểm tra từ database (xác thực mật khẩu bằng bcrypt)
-    role_map = {"Quản trị viên": 3, "Giáo viên": 1, "Học sinh": 2}
+    role_map = {"Quản lý": 3, "Giáo viên": 1, "Học sinh": 2}
     role_id = role_map.get(role)
 
     query = "SELECT user_id, full_name, password FROM users WHERE username = %s AND role_id = %s"
@@ -182,28 +217,11 @@ def login():
     if result:
         stored_pwd = result[0][2]
         if isinstance(stored_pwd, bytes):
-            stored_pwd_str = stored_pwd.decode("utf-8", errors="ignore")
+            stored_pwd_str = stored_pwd.decode("utf-8")
         else:
             stored_pwd_str = str(stored_pwd) if stored_pwd is not None else ""
-        authenticated = False
-        # Thử bcrypt trước
-        try:
-            if stored_pwd_str.startswith("$2"):
-                authenticated = bcrypt.checkpw(password.encode("utf-8"), stored_pwd_str.encode("utf-8"))
-        except Exception:
-            authenticated = False
-        # Fallback: so sánh plain text (cho tài khoản đăng ký cũ chưa được hash)
-        if not authenticated and stored_pwd_str == password:
-            authenticated = True
-            # Tự động nâng cấp lên bcrypt
-            try:
-                pwd_hashed = bcrypt.hashpw(password.encode("utf-8"), bcrypt.gensalt()).decode("utf-8")
-                execute_query(
-                    "UPDATE users SET password = %s WHERE user_id = %s",
-                    (pwd_hashed, result[0][0]),
-                )
-            except Exception:
-                pass
+        
+        authenticated = (stored_pwd_str == password)
     else:
         authenticated = False
 
@@ -212,7 +230,7 @@ def login():
         current_user = {"user_id": user_id, "full_name": full_name, "role_id": role_id}
         login_window.withdraw()
 
-        if role == "Quản trị viên":
+        if role == "Quản lý":
             open_admin_dashboard()
         elif role == "Giáo viên":
             open_teacher_dashboard()
@@ -226,145 +244,67 @@ def login():
 # ===================== ADMIN =====================
 
 def open_account_management():
-    window = tk.Toplevel()
-    window.title("Quản lý tài khoản")
-    window.geometry("650x420")
-
+    window = create_window("Quản lý tài khoản", "650x420")
     tk.Label(window, text="QUẢN LÝ TÀI KHOẢN", font=("Arial", 16, "bold")).pack(pady=12)
 
-    columns = ("Tên đăng nhập", "Họ và tên", "Vai trò")
-    tree = ttk.Treeview(window, columns=columns, show="headings", height=10)
-    for col in columns:
-        tree.heading(col, text=col)
-        tree.column(col, width=200)
-    tree.pack(pady=10, padx=20, fill="x")
+    cols = ("Tên đăng nhập", "Mật khẩu (Hash)", "Họ và tên", "Vai trò")
+    tree = ui_treeview(window, cols, {"Tên đăng nhập": 120, "Mật khẩu (Hash)": 200, "Họ và tên": 150, "Vai trò": 100})
 
-    # Lấy dữ liệu từ database
-    query = """
-    SELECT u.username, u.full_name, r.role_name
-    FROM users u
-    JOIN roles r ON u.role_id = r.role_id
-    """
-    accounts = execute_query(query, fetch=True)
-
+    accounts = execute_query("SELECT u.username, u.password, u.full_name, r.role_name FROM users u JOIN roles r ON u.role_id = r.role_id", fetch=True)
     if accounts:
-        for account in accounts:
-            tree.insert("", tk.END, values=account)
+        for r in accounts:
+            tree.insert("", tk.END, values=r)
 
     def delete_account():
-        selected_items = tree.selection()
-        if not selected_items:
-            messagebox.showwarning("Cảnh báo", "Vui lòng chọn một tài khoản để xóa!")
-            return
-
-        confirm = messagebox.askyesno("Xác nhận", "Bạn có chắc chắn muốn xóa tài khoản này? Dữ liệu liên quan cũng sẽ bị xóa.")
-        if confirm:
-            for item in selected_items:
-                values = tree.item(item, 'values')
-                username = values[0]
-
-                # Lấy user_id từ username
-                query_get_id = "SELECT user_id FROM users WHERE username = %s"
-                user_id_result = execute_query(query_get_id, (username,), fetch=True)
-
-                if not user_id_result:
-                    messagebox.showerror("Lỗi", f"Không tìm thấy tài khoản: {username}")
-                    continue
-
-                user_id = user_id_result[0][0]
-
-                try:
-                    # Xóa các dữ liệu liên quan
-                    # 1. Xóa attendance records
-                    execute_query("DELETE FROM attendance WHERE student_id IN (SELECT student_id FROM students WHERE user_id = %s)", (user_id,))
-
-                    # 2. Xóa grades records
-                    execute_query("DELETE FROM grades WHERE student_id IN (SELECT student_id FROM students WHERE user_id = %s)", (user_id,))
-
-                    # 3. Xóa teaching_assignments (nếu là giáo viên)
-                    execute_query("DELETE FROM teaching_assignments WHERE teacher_id = %s", (user_id,))
-
-                    # 4. Cập nhật homeroom_teacher_id thành NULL (nếu là GVCN)
-                    execute_query("UPDATE classes SET homeroom_teacher_id = NULL WHERE homeroom_teacher_id = %s", (user_id,))
-
-                    # 5. Xóa student record
-                    execute_query("DELETE FROM students WHERE user_id = %s", (user_id,))
-
-                    # 6. Xóa user record
-                    result = execute_query("DELETE FROM users WHERE user_id = %s", (user_id,))
-
-                    if result > 0:
-                        tree.delete(item)
-                        messagebox.showinfo("Thành công", "Tài khoản và dữ liệu liên quan đã bị xóa!")
-                    else:
-                        messagebox.showerror("Lỗi", "Không thể xóa tài khoản này!")
-                except Exception as e:
-                    messagebox.showerror("Lỗi", f"Lỗi khi xóa: {str(e)}")
+        for item in tree.selection():
+            un = tree.item(item, 'values')[0]
+            res = execute_query("SELECT user_id FROM users WHERE username=%s", (un,), fetch=True)
+            if res:
+                uid = res[0][0]
+                execute_query("DELETE FROM attendance WHERE student_id IN (SELECT student_id FROM students WHERE user_id=%s)", (uid,))
+                execute_query("DELETE FROM grades WHERE student_id IN (SELECT student_id FROM students WHERE user_id=%s)", (uid,))
+                execute_query("DELETE FROM students WHERE user_id=%s", (uid,))
+                execute_query("DELETE FROM teaching_assignments WHERE teacher_id=%s", (uid,))
+                execute_query("UPDATE classes SET homeroom_teacher_id = NULL WHERE homeroom_teacher_id = %s", (uid,))
+                execute_query("DELETE FROM users WHERE user_id=%s", (uid,))
+                tree.delete(item)
 
     def add_account():
-        add_win = tk.Toplevel(window)
-        add_win.title("Thêm tài khoản")
-        add_win.geometry("300x250")
-        add_win.grab_set()
+        add_win = create_window("Thêm tài khoản", "380x450", True)
+        tk.Label(add_win, text="THÊM TÀI KHOẢN MỚI", font=("Arial", 12, "bold")).pack(pady=10)
+        
+        ent_fullname = ui_label_entry(add_win, "Họ và tên:")
+        ent_username = ui_label_entry(add_win, "Tên đăng nhập:")
+        ent_password = ui_label_entry(add_win, "Mật khẩu:", show="*")
+        role_combo = ttk.Combobox(add_win, values=["Quản lý", "Giáo viên", "Học sinh"], state="readonly", width=27)
+        role_combo.pack(pady=5)
 
-        tk.Label(add_win, text="Tên đăng nhập:").pack(pady=(10, 2))
-        entry_user = tk.Entry(add_win, width=30)
-        entry_user.pack()
-
-        tk.Label(add_win, text="Họ và tên:").pack(pady=(10, 2))
-        entry_name = tk.Entry(add_win, width=30)
-        entry_name.pack()
-
-        tk.Label(add_win, text="Mật khẩu:").pack(pady=(10, 2))
-        entry_pass = tk.Entry(add_win, width=30, show="*")
-        entry_pass.pack()
-
-        tk.Label(add_win, text="Vai trò:").pack(pady=(10, 2))
-        combo_role = ttk.Combobox(add_win, values=["Giáo viên", "Học sinh", "Quản lý"], state="readonly", width=27)
-        combo_role.pack()
-
-        def save_new_account():
-            user = entry_user.get().strip()
-            name = entry_name.get().strip()
-            pwd = entry_pass.get().strip()
-            role = combo_role.get()
-
-            if not user or not name or not pwd or not role:
-                messagebox.showerror("Lỗi", "Vui lòng điền đầy đủ thông tin!")
+        def save_account():
+            fn, un, pw, role = ent_fullname.get().strip(), ent_username.get().strip(), ent_password.get().strip(), role_combo.get()
+            if not all([fn, un, pw, role]):
+                messagebox.showwarning("Thông báo", "Vui lòng nhập đầy đủ thông tin!", parent=add_win)
                 return
 
-            # Lưu vào database
             role_map = {"Giáo viên": 1, "Học sinh": 2, "Quản lý": 3}
-            role_id = role_map.get(role, 2)
-
-            # Hash mật khẩu trước khi lưu (Sửa lỗi bảo mật)
-            pwd_hashed = bcrypt.hashpw(pwd.encode("utf-8"), bcrypt.gensalt())
-            query = "INSERT INTO users (full_name, username, password, role_id) VALUES (%s, %s, %s, %s)"
-            result = execute_query(query, (name, user, pwd_hashed, role_id))
-
-            if result:
-                tree.insert(parent="", index=tk.END, values=(user, name, role))
-                messagebox.showinfo("Thành công", "Đã thêm tài khoản thành công!")
+            try:
+                execute_query("INSERT INTO users (full_name, username, password, role_id) VALUES (%s, %s, %s, %s)", (fn, un, pw, role_map[role]))
+                messagebox.showinfo("Thành công", "Đã thêm tài khoản mới!", parent=add_win)
+                # Hiển thị mật khẩu dưới dạng plain text trong bảng
+                tree.insert("", tk.END, values=(un, pw, fn, role))
                 add_win.destroy()
-            else:
-                messagebox.showerror("Lỗi", "Tài khoản đã tồn tại hoặc lỗi khác!")
+            except Exception as e:
+                messagebox.showerror("Lỗi", f"Không thể thêm tài khoản: {e}", parent=add_win)
 
-        button_frame = tk.Frame(add_win)
-        button_frame.pack(pady=20)
-        tk.Button(button_frame, text="Thêm", command=save_new_account, width=12, bg="#d4edda", font=("Arial", 10, "bold")).pack(side=tk.LEFT, padx=5)
-        tk.Button(button_frame, text="Hủy", command=add_win.destroy, width=12, font=("Arial", 10)).pack(side=tk.LEFT, padx=5)
-
+        tk.Button(add_win, text="Thêm", width=15, bg="#d4edda", command=save_account).pack(pady=20)
+    
     action_frame = tk.Frame(window)
     action_frame.pack(pady=10)
-    tk.Button(action_frame, text="Thêm tài khoản", width=15, command=add_account).pack(side=tk.LEFT, padx=10)
-    tk.Button(action_frame, text="Xóa tài khoản", width=15, command=delete_account).pack(side=tk.LEFT, padx=10)
+    ui_button(action_frame, "Thêm tài khoản", add_account).pack(side=tk.LEFT, padx=10)
+    ui_button(action_frame, "Xóa tài khoản", delete_account).pack(side=tk.LEFT, padx=10)
 
 
 def open_teacher_management():
-    window = tk.Toplevel()
-    window.title("Quản lý giáo viên")
-    window.geometry("650x450")
-
+    window = create_window("Quản lý giáo viên", "650x450")
     tk.Label(window, text="QUẢN LÝ GIÁO VIÊN", font=("Arial", 16, "bold")).pack(pady=12)
 
     # Ô tìm kiếm giống giao diện quản lý học sinh
@@ -374,12 +314,8 @@ def open_teacher_management():
     entry_keyword = tk.Entry(search_frame, width=22, font=("Arial", 10))
     entry_keyword.pack(side=tk.LEFT, padx=5)
 
-    columns = ("Tên đăng nhập", "Họ và tên", "Email", "SĐT")
-    tree = ttk.Treeview(window, columns=columns, show="headings", height=10)
-    for col in columns:
-        tree.heading(col, text=col)
-        tree.column(col, width=140)
-    tree.pack(pady=10, padx=20, fill="x")
+    cols = ("Tên đăng nhập", "Họ và tên", "Email", "SĐT")
+    tree = ui_treeview(window, cols, {"Tên đăng nhập": 120, "Họ và tên": 150})
 
     def load_teachers(keyword: str = ""):
         """Tải danh sách giáo viên, có thể lọc theo từ khoá (full_name/username)."""
@@ -421,32 +357,14 @@ def open_teacher_management():
     load_teachers("")
 
     def add_teacher():
-        add_win = tk.Toplevel(window)
-        add_win.title("Thêm giáo viên")
-        add_win.geometry("380x500")
-        add_win.grab_set()
-
+        add_win = create_window("Thêm giáo viên", "380x520", True)
         tk.Label(add_win, text="Thêm giáo viên mới", font=("Arial", 12, "bold")).pack(pady=10)
 
-        tk.Label(add_win, text="Tên đăng nhập:").pack(pady=(10, 2))
-        entry_user = tk.Entry(add_win, width=30)
-        entry_user.pack()
-
-        tk.Label(add_win, text="Họ và tên:").pack(pady=(10, 2))
-        entry_name = tk.Entry(add_win, width=30)
-        entry_name.pack()
-
-        tk.Label(add_win, text="Mật khẩu:").pack(pady=(10, 2))
-        entry_pass = tk.Entry(add_win, width=30, show="*")
-        entry_pass.pack()
-
-        tk.Label(add_win, text="Email:").pack(pady=(10, 2))
-        entry_email = tk.Entry(add_win, width=30)
-        entry_email.pack()
-
-        tk.Label(add_win, text="Số điện thoại:").pack(pady=(10, 2))
-        entry_phone = tk.Entry(add_win, width=30)
-        entry_phone.pack()
+        entry_user = ui_label_entry(add_win, "Tên đăng nhập:")
+        entry_name = ui_label_entry(add_win, "Họ và tên:")
+        entry_pass = ui_label_entry(add_win, "Mật khẩu:", show="*")
+        entry_email = ui_label_entry(add_win, "Email:")
+        entry_phone = ui_label_entry(add_win, "Số điện thoại:")
 
         # Submit bằng phím Enter
         add_win.bind("<Return>", lambda e: save_teacher())
@@ -492,32 +410,31 @@ def open_teacher_management():
                 return
 
             class_id = int(class_info.split(" - ")[0])
-            subject_id = int(subject_info.split(" - ")[0])
+            subject_parts = subject_info.split(" - ", 1)
+            subject_id = int(subject_parts[0])
+            subject_name = subject_parts[1]
 
             # Lưu vào database trong 1 transaction (hash mật khẩu)
-            pwd_hashed = bcrypt.hashpw(pwd.encode("utf-8"), bcrypt.gensalt())
             insert_user_sql = "INSERT INTO users (full_name, username, password, role_id, email, phone) VALUES (%s, %s, %s, %s, %s, %s)"
             select_user_sql = "SELECT user_id FROM users WHERE username = %s"
             insert_assign_sql = "INSERT INTO teaching_assignments (teacher_id, class_id, subject_id) VALUES (%s, %s, %s)"
 
-            teacher_id = None
-            with DatabaseManager() as db:
-                if db is None:
-                    return
-                try:
-                    db.execute(insert_user_sql, (name, user, pwd_hashed, 1, email, phone))
+            try:
+                with DatabaseManager() as db:
+                    if db is None: return
+                    # Lưu mật khẩu dưới dạng plain text
+                    db.execute(insert_user_sql, (name, user, pwd, 1, email, phone))
                     row = db.execute(select_user_sql, (user,), fetch=True)
-                    if row:
-                        teacher_id = row[0][0]
-                        db.execute(insert_assign_sql, (teacher_id, class_id, subject_id))
-                except mysql.connector.errors.IntegrityError as e:
-                    messagebox.showerror("Lỗi", f"Tên đăng nhập đã tồn tại hoặc dữ liệu không hợp lệ: {e}", parent=add_win)
-                    return
-                except Error as e:
-                    messagebox.showerror("Lỗi", f"Lỗi database: {e}", parent=add_win)
-                    return
-
-            if teacher_id:
+                    if not row:
+                        raise Exception("Không thể khởi tạo tài khoản giáo viên.")
+                    
+                    teacher_id = row[0][0]
+                    db.execute(insert_assign_sql, (teacher_id, class_id, subject_id))
+                    
+                    if subject_name == "Giáo viên chủ nhiệm":
+                        db.execute("UPDATE classes SET homeroom_teacher_id = %s WHERE class_id = %s", (teacher_id, class_id))
+                
+                # Nếu chạy đến đây tức là Transaction đã commit thành công
                 tree.insert(parent="", index=tk.END, values=(user, name, email, phone))
                 messagebox.showinfo(
                     "Thành công",
@@ -525,9 +442,8 @@ def open_teacher_management():
                     parent=add_win,
                 )
                 add_win.destroy()
-            else:
-                messagebox.showerror("Lỗi", "Không thể tạo giáo viên!", parent=add_win)
-            return
+            except Exception as e:
+                messagebox.showerror("Lỗi", f"Không thể thêm giáo viên: {e}", parent=add_win)
 
         button_frame = tk.Frame(add_win)
         button_frame.pack(pady=15)
@@ -576,17 +492,13 @@ def open_teacher_management():
 
     action_frame = tk.Frame(window)
     action_frame.pack(pady=10)
-    tk.Button(action_frame, text="Thêm giáo viên", width=15, command=add_teacher).pack(side=tk.LEFT, padx=5)
-    tk.Button(action_frame, text="Xóa giáo viên", width=15, command=delete_teacher).pack(side=tk.LEFT, padx=5)
+    ui_button(action_frame, "Thêm giáo viên", add_teacher).pack(side=tk.LEFT, padx=5)
+    ui_button(action_frame, "Xóa giáo viên", delete_teacher).pack(side=tk.LEFT, padx=5)
 
     window.protocol("WM_DELETE_WINDOW", window.destroy)
 
-
 def open_student_management():
-    window = tk.Toplevel()
-    window.title("Quản lý học sinh")
-    window.geometry("650x500")
-
+    window = create_window("Quản lý học sinh", "650x500")
     tk.Label(window, text="QUẢN LÝ HỌC SINH", font=("Arial", 16, "bold")).pack(pady=12)
 
     # Lấy dữ liệu từ database
@@ -606,12 +518,8 @@ def open_student_management():
     entry_keyword = tk.Entry(search_frame, width=22, font=("Arial", 10))
     entry_keyword.pack(side=tk.LEFT, padx=5)
 
-    columns = ("Mã HS", "Họ và tên", "Lớp")
-    tree = ttk.Treeview(window, columns=columns, show="headings", height=10)
-    for col in columns:
-        tree.heading(col, text=col)
-        tree.column(col, width=200)
-    tree.pack(pady=10, padx=20, fill="x")
+    cols = ("Mã HS", "Họ và tên", "Lớp")
+    tree = ui_treeview(window, cols, {"Mã HS": 150})
 
     def search_student():
         keyword = entry_keyword.get().strip().lower()
@@ -648,24 +556,14 @@ def open_student_management():
             tree.insert(parent="", index=tk.END, values=student[1:])
 
     def add_student():
-        add_win = tk.Toplevel(window)
-        add_win.title("Thêm học sinh")
-        add_win.geometry("380x520")
-        add_win.grab_set()
-
+        add_win = create_window("Thêm học sinh", "380x650", True)
         tk.Label(add_win, text="Thêm học sinh mới", font=("Arial", 12, "bold")).pack(pady=10)
 
-        tk.Label(add_win, text="Mã học sinh:").pack(pady=(10, 2))
-        entry_code = tk.Entry(add_win, width=30)
-        entry_code.pack()
-
-        tk.Label(add_win, text="Họ và tên:").pack(pady=(10, 2))
-        entry_name = tk.Entry(add_win, width=30)
-        entry_name.pack()
-
-        tk.Label(add_win, text="Ngày sinh (YYYY-MM-DD):").pack(pady=(10, 2))
-        entry_dob = tk.Entry(add_win, width=30)
-        entry_dob.pack()
+        entry_code = ui_label_entry(add_win, "Mã học sinh:")
+        entry_name = ui_label_entry(add_win, "Họ và tên:")
+        entry_username = ui_label_entry(add_win, "Tên đăng nhập:")
+        entry_password = ui_label_entry(add_win, "Mật khẩu:", show="*")
+        entry_dob = ui_label_entry(add_win, "Ngày sinh (YYYY-MM-DD):")
 
         tk.Label(add_win, text="Giới tính:").pack(pady=(10, 2))
         combo_gender = ttk.Combobox(add_win, values=["Nam", "Nữ", "Khác"], state="readonly", width=27)
@@ -681,70 +579,75 @@ def open_student_management():
         class_list = [(f"{c[0]} - {c[1]}") for c in class_results] if class_results else []
         combo_class['values'] = class_list
 
-        tk.Label(add_win, text="Số điện thoại phụ huynh:").pack(pady=(10, 2))
-        entry_phone = tk.Entry(add_win, width=30)
-        entry_phone.pack()
-
-        # Checkbox tuỳ chọn: có tự động điểm danh "Có mặt" cho hôm nay hay không
-        attendance_today_var = tk.BooleanVar(value=False)
-        tk.Checkbutton(
-            add_win,
-            text="Điểm danh 'Có mặt' cho hôm nay",
-            variable=attendance_today_var,
-        ).pack(pady=(8, 0))
+        entry_phone = ui_label_entry(add_win, "Số điện thoại phụ huynh:")
 
         def save_student():
             code = entry_code.get().strip()
             name = entry_name.get().strip()
+            username = entry_username.get().strip()
+            password = entry_password.get().strip()
             dob = entry_dob.get().strip()
             gender = combo_gender.get()
             class_info = combo_class.get()
             phone = entry_phone.get().strip()
 
-            if not all([code, name, dob, gender, class_info, phone]):
+            if not all([code, name, username, password, dob, gender, class_info, phone]):
                 messagebox.showerror("Lỗi", "Vui lòng điền đầy đủ thông tin!", parent=add_win)
+                return
+
+            # 1. Validate input data
+            # Validate phone
+            if not validate_phone(phone):
+                messagebox.showerror("Lỗi", "Số điện thoại không hợp lệ (chỉ chứa 9-11 chữ số)!", parent=add_win)
+                return
+
+            # Validate date of birth format
+            try:
+                datetime.strptime(dob, '%Y-%m-%d')
+            except ValueError:
+                messagebox.showerror("Lỗi", "Ngày sinh không hợp lệ. Vui lòng nhập theo định dạng YYYY-MM-DD!", parent=add_win)
+                return
+
+            # Check for duplicate student_code / username
+            existing_student = execute_query("SELECT student_code FROM students WHERE student_code = %s", (code,), fetch=True)
+            if existing_student:
+                messagebox.showerror("Lỗi", f"Mã học sinh '{code}' đã tồn tại!", parent=add_win)
+                return
+            
+            existing_user = execute_query("SELECT username FROM users WHERE username = %s", (username,), fetch=True)
+            if existing_user:
+                messagebox.showerror("Lỗi", f"Tên đăng nhập '{username}' đã tồn tại!", parent=add_win)
                 return
 
             # Lấy class_id từ class_info
             class_id = int(class_info.split(" - ")[0])
 
-            # Tạo user trước (mật khẩu mặc định được hash bằng bcrypt)
-            username = code.lower()
-            default_pwd = "123456"
-            pwd_hashed = bcrypt.hashpw(default_pwd.encode("utf-8"), bcrypt.gensalt())
-            user_query = "INSERT INTO users (full_name, username, password, role_id) VALUES (%s, %s, %s, %s)"
-            execute_query(user_query, (name, username, pwd_hashed, 2))  # role_id=2 là học sinh
+            # Tạo user trước (mật khẩu được hash bằng bcrypt)
+            try:
+                with DatabaseManager() as db:
+                    if db is None: return
+                    # 1. Tạo tài khoản user (role_id=2 là học sinh), lưu mật khẩu plain text
+                    db.execute("INSERT INTO users (full_name, username, password, role_id) VALUES (%s, %s, %s, %s)",
+                               (name, username, password, 2))
+                    
+                    # 2. Lấy user_id vừa tạo
+                    user_res = db.execute("SELECT user_id FROM users WHERE username = %s", (username,), fetch=True)
+                    if not user_res: raise Exception("Không tìm thấy UserID vừa tạo.")
+                    user_id = user_res[0][0]
 
-            # Lấy user_id vừa tạo
-            user_id_query = "SELECT user_id FROM users WHERE username = %s"
-            user_result = execute_query(user_id_query, (username,), fetch=True)
-
-            if user_result:
-                user_id = user_result[0][0]
-
-                # Thêm student record (chỉ INSERT vào bảng students, KHÔNG tạo attendance)
-                student_query = "INSERT INTO students (user_id, student_code, date_of_birth, gender, parent_phone, class_id, enrollment_date, status) VALUES (%s, %s, %s, %s, %s, %s, CURDATE(), 'Đang học')"
-                execute_query(student_query, (user_id, code, dob, gender, phone, class_id))
-
-                # Chỉ tạo bản ghi attendance nếu người dùng tick chọn
-                if attendance_today_var.get():
-                    student_id_row = execute_query(
-                        "SELECT student_id FROM students WHERE user_id = %s", (user_id,), fetch=True
-                    )
-                    if student_id_row:
-                        student_id = student_id_row[0][0]
-                        execute_query(
-                            "INSERT INTO attendance (student_id, class_id, attendance_date, status, recorded_by) VALUES (%s, %s, CURDATE(), 'Có mặt', %s)",
-                            (student_id, class_id, user_id),
-                        )
-
+                    # 3. Thêm thông tin vào bảng students
+                    db.execute("""
+                        INSERT INTO students (user_id, student_code, date_of_birth, gender, parent_phone, class_id, enrollment_date, status) 
+                        VALUES (%s, %s, %s, %s, %s, %s, CURDATE(), 'Đang học')
+                    """, (user_id, code, dob, gender, phone, class_id))
+                # Thành công: Transaction đã committed
                 messagebox.showinfo("Thành công", "Đã thêm học sinh thành công!", parent=add_win)
                 add_win.destroy()
                 # Reload danh sách
                 window.destroy()
                 open_student_management()
-            else:
-                messagebox.showerror("Lỗi", "Không thể tạo học sinh!", parent=add_win)
+            except Exception as e:
+                messagebox.showerror("Lỗi", f"Không thể tạo học sinh: {e}", parent=add_win)
 
         button_frame = tk.Frame(add_win)
         button_frame.pack(pady=15)
@@ -753,7 +656,7 @@ def open_student_management():
 
     action_frame = tk.Frame(window)
     action_frame.pack(pady=10)
-    tk.Button(action_frame, text="Thêm học sinh", width=15, command=add_student).pack(side=tk.LEFT, padx=5)
+    ui_button(action_frame, "Thêm học sinh", add_student).pack(side=tk.LEFT, padx=5)
 
     def delete_student():
         """Xoá học sinh đang chọn (xử lý cả bảng liên quan: attendance, users)."""
@@ -801,13 +704,10 @@ def open_student_management():
 
         messagebox.showinfo("Thành công", "Đã xoá học sinh đã chọn.", parent=window)
 
-    tk.Button(action_frame, text="Xoá học sinh", width=15, bg="#f8d7da", command=delete_student).pack(side=tk.LEFT, padx=5)
+    ui_button(action_frame, "Xoá học sinh", delete_student, bg="#f8d7da").pack(side=tk.LEFT, padx=5)
 
 def open_class_management():
-    window = tk.Toplevel()
-    window.title("Quản lý lớp học")
-    window.geometry("650x420")
-
+    window = create_window("Quản lý lớp học", "650x420")
     tk.Label(window, text="QUẢN LÝ LỚP HỌC", font=("Arial", 16, "bold")).pack(pady=12)
 
     tk.Label(
@@ -817,12 +717,8 @@ def open_class_management():
         fg="gray",
     ).pack()
 
-    columns = ("Mã lớp", "Tên lớp", "GVCN")
-    tree = ttk.Treeview(window, columns=columns, show="headings", height=10)
-    for col in columns:
-        tree.heading(col, text=col)
-        tree.column(col, width=200)
-    tree.pack(pady=10, padx=20, fill="x")
+    cols = ("Mã lớp", "Tên lớp", "GVCN")
+    tree = ui_treeview(window, cols, {})
 
     # Lấy dữ liệu từ database
     query = """
@@ -849,16 +745,10 @@ def open_class_management():
     tk.Button(window, text="Xem danh sách học sinh", command=on_class_select, bg="#d4edda").pack(pady=8)
 
     def add_class():
-        add_win = tk.Toplevel(window)
-        add_win.title("Thêm lớp học")
-        add_win.geometry("350x300")
-        add_win.grab_set()
-
+        add_win = create_window("Thêm lớp học", "350x350", True)
         tk.Label(add_win, text="Thêm lớp học mới", font=("Arial", 12, "bold")).pack(pady=10)
-
-        tk.Label(add_win, text="Tên lớp:").pack(pady=(10, 2))
-        entry_name = tk.Entry(add_win, width=30)
-        entry_name.pack()
+        
+        entry_name = ui_label_entry(add_win, "Tên lớp:")
 
         tk.Label(add_win, text="Khối lớp:").pack(pady=(10, 2))
         combo_grade = ttk.Combobox(add_win, state="readonly", width=27)
@@ -870,13 +760,8 @@ def open_class_management():
         grade_list = [(f"{g[0]} - {g[1]}") for g in grade_results] if grade_results else []
         combo_grade['values'] = grade_list
 
-        tk.Label(add_win, text="Năm học (VD: 2026-2027):").pack(pady=(10, 2))
-        entry_year = tk.Entry(add_win, width=30)
-        entry_year.pack()
-
-        tk.Label(add_win, text="Sức chứa tối đa:").pack(pady=(10, 2))
-        entry_max = tk.Entry(add_win, width=30)
-        entry_max.pack()
+        entry_year = ui_label_entry(add_win, "Năm học (VD: 2026-2027):")
+        entry_max = ui_label_entry(add_win, "Sức chứa tối đa:")
 
         def save_class():
             name = entry_name.get().strip()
@@ -910,7 +795,7 @@ def open_class_management():
 
     action_frame = tk.Frame(window)
     action_frame.pack(pady=10)
-    tk.Button(action_frame, text="Thêm lớp", width=15, command=add_class).pack(side=tk.LEFT, padx=5)
+    ui_button(action_frame, "Thêm lớp", add_class).pack(side=tk.LEFT, padx=5)
 
     def delete_student():
         """Xoá học sinh đang chọn (xử lý cả bảng liên quan: attendance, users)."""
@@ -940,21 +825,14 @@ def open_class_management():
                 tree.delete(item)
         messagebox.showinfo("Thành công", "Đã xoá học sinh thành công.", parent=window)
 
-    tk.Button(action_frame, text="Xoá học sinh", width=15, bg="#f8d7da", command=delete_student).pack(side=tk.LEFT, padx=5)
+    ui_button(action_frame, "Xoá học sinh", delete_student, bg="#f8d7da").pack(side=tk.LEFT, padx=5)
 
 def open_teacher_assignment():
-    window = tk.Toplevel()
-    window.title("Phân công giáo viên")
-    window.geometry("650x420")
-
+    window = create_window("Phân công giáo viên", "650x420")
     tk.Label(window, text="PHÂN CÔNG GIÁO VIÊN", font=("Arial", 16, "bold")).pack(pady=12)
 
-    columns = ("Lớp", "Môn học", "Giáo viên")
-    tree = ttk.Treeview(window, columns=columns, show="headings", height=10)
-    for col in columns:
-        tree.heading(col, text=col)
-        tree.column(col, width=200)
-    tree.pack(pady=10, padx=20, fill="x")
+    cols = ("Lớp", "Môn học", "Giáo viên")
+    tree = ui_treeview(window, cols, {})
 
     # Lấy dữ liệu từ database
     query = """
@@ -971,9 +849,7 @@ def open_teacher_assignment():
             tree.insert("", tk.END, values=item)
 
 def open_admin_report():
-    window = tk.Toplevel()
-    window.title("Báo cáo tổng hợp")
-    window.geometry("700x420")
+    window = create_window("Báo cáo tổng hợp", "700x420")
     tk.Label(window, text="BÁO CÁO TỔNG HỢP", font=("Arial", 16, "bold")).pack(pady=12)
 
     # Lấy thống kê từ database
@@ -991,12 +867,8 @@ def open_admin_report():
     tk.Label(summary_frame, text=f"Tổng số giáo viên: {total_teachers}", anchor="w").pack(fill="x")
     tk.Label(summary_frame, text=f"Tổng số lớp: {total_classes}", anchor="w").pack(fill="x")
 
-    columns = ("Tiêu chí", "Giá trị")
-    tree = ttk.Treeview(window, columns=columns, show="headings", height=8)
-    for col in columns:
-        tree.heading(col, text=col)
-        tree.column(col, width=320)
-    tree.pack(pady=10, padx=20, fill="x")
+    cols = ("Tiêu chí", "Giá trị")
+    tree = ui_treeview(window, cols, {"Tiêu chí": 300, "Giá trị": 300})
 
     # Lấy thống kê điểm danh
     query_attendance = """
@@ -1051,23 +923,18 @@ def open_admin_dashboard():
 
 def open_class_student_list(class_id, class_name):
     """Mở cửa sổ danh sách học sinh của một lớp cụ thể, kèm trạng thái điểm danh hôm nay."""
-    detail_win = tk.Toplevel()
-    detail_win.title(f"Danh sách học sinh - Lớp {class_name}")
-    detail_win.geometry("820x460")
-
+    detail_win = create_window(f"Lớp {class_name}", "820x460")
     tk.Label(detail_win, text=f"DANH SÁCH HỌC SINH LỚP {class_name}", font=("Arial", 14, "bold")).pack(pady=10)
 
-    columns = ("Họ và tên", "Ngày sinh", "Mã học sinh", "Giới tính", "Trạng thái")
-    detail_tree = ttk.Treeview(detail_win, columns=columns, show="headings", height=14)
-    widths = {"Họ và tên": 200, "Ngày sinh": 110, "Mã học sinh": 110, "Giới tính": 80, "Trạng thái": 130}
-    for col in columns:
-        detail_tree.heading(col, text=col)
-        detail_tree.column(col, width=widths[col], anchor="center")
+    cols = ("Họ và tên", "Ngày sinh", "Mã học sinh", "Giới tính", "Trạng thái")
+    w = {"Họ và tên": 200, "Ngày sinh": 110, "Mã học sinh": 110, "Giới tính": 80, "Trạng thái": 130}
+    detail_tree = ui_treeview(detail_win, cols, w)
+    detail_tree.configure(height=14)
     detail_tree.pack(pady=10, padx=20, fill="both", expand=True)
 
     sql = """
     SELECT u.full_name,
-           DATE_FORMAT(s.date_of_birth, '%d/%m/%Y') AS dob,
+           DATE_FORMAT(s.date_of_birth, %s) AS dob,
            s.student_code,
            COALESCE(s.gender, 'N/A') AS gender,
            COALESCE(a.status, 'Chưa điểm danh') AS trang_thai
@@ -1079,7 +946,7 @@ def open_class_student_list(class_id, class_name):
     WHERE s.class_id = %s
     ORDER BY u.full_name
     """
-    students = execute_query(sql, (class_id,), fetch=True)
+    students = execute_query(sql, ('%d/%m/%Y', class_id), fetch=True)
 
     if students:
         for row in students:
@@ -1090,21 +957,12 @@ def open_class_student_list(class_id, class_name):
     tk.Button(detail_win, text="Đóng", width=12, command=detail_win.destroy).pack(pady=10)
 
 
-def open_teacher_class_list():
-    window = tk.Toplevel()
-    window.title("Danh sách lớp")
-    window.geometry("650x420")
-
+def open_teacher_class_list(on_class_selected):
+    window = create_window("Danh sách lớp", "650x420")
     tk.Label(window, text="DANH SÁCH LỚP", font=("Arial", 16, "bold")).pack(pady=12)
 
-    columns = ("Mã lớp", "Tên lớp", "Số HS")
-    tree = ttk.Treeview(window, columns=columns, show="headings", height=10)
-    for col in columns:
-        tree.heading(col, text=col)
-        tree.column(col, width=180)
-    tree.pack(pady=10, padx=20, fill="x")
+    tree = ui_treeview(window, ("Mã lớp", "Tên lớp", "Số HS"), {"Mã lớp": 80, "Tên lớp": 200, "Số HS": 80})
 
-    # Lấy danh sách lớp từ database
     query = """
     SELECT c.class_id, c.class_name, COUNT(s.student_id) as so_hoc_sinh
     FROM classes c
@@ -1112,38 +970,56 @@ def open_teacher_class_list():
     GROUP BY c.class_id, c.class_name
     """
     classes = execute_query(query, fetch=True)
-
     if classes:
         for classroom in classes:
             tree.insert("", tk.END, values=classroom)
 
-def open_teacher_attendance():
-    window = tk.Toplevel()
-    window.title("Điểm danh")
-    window.geometry("700x450")
+    def confirm_selection():
+        selected = tree.selection()
+        if not selected:
+            messagebox.showwarning("Thông báo", "Vui lòng chọn một lớp!")
+            return
+        vals = tree.item(selected[0], 'values')
+        on_class_selected(vals[0], vals[1])
+        window.destroy()
 
-    tk.Label(window, text="ĐIỂM DANH HỌC SINH", font=("Arial", 16, "bold")).pack(pady=12)
+    tk.Button(window, text="Chọn lớp này", command=confirm_selection, bg="#d4edda", width=20, font=("Arial", 10, "bold")).pack(pady=10)
 
-    # Lấy danh sách học sinh từ database (mặc định lấy lớp đầu tiên)
+def open_teacher_attendance(class_id, class_name, on_save_callback):
+    window = create_window(f"Điểm danh - {class_name}", "600x500")
+    tk.Label(window, text=f"GIAO DIỆN ĐIỂM DANH: {class_name}", font=("Arial", 14, "bold"), fg="blue").pack(pady=10)
+
+    # Tạo vùng cuộn (Scrollbar) cho danh sách học sinh
+    container = tk.Frame(window)
+    container.pack(fill="both", expand=True, padx=10, pady=5)
+    
+    canvas = tk.Canvas(container)
+    scrollbar = ttk.Scrollbar(container, orient="vertical", command=canvas.yview)
+    scrollable_frame = tk.Frame(canvas)
+
+    scrollable_frame.bind("<Configure>", lambda e: canvas.configure(scrollregion=canvas.bbox("all")))
+    canvas.create_window((0, 0), window=scrollable_frame, anchor="nw")
+    canvas.configure(yscrollcommand=scrollbar.set)
+    
+    canvas.pack(side="left", fill="both", expand=True)
+    scrollbar.pack(side="right", fill="y")
+
     query = """
-    SELECT s.student_id, u.full_name, c.class_id
+    SELECT s.student_id, u.full_name, s.class_id
     FROM students s
     JOIN users u ON s.user_id = u.user_id
-    JOIN classes c ON s.class_id = c.class_id
-    LIMIT 10
+    WHERE s.class_id = %s
+    ORDER BY u.full_name
     """
-    students_data = execute_query(query, fetch=True)
+    students_data = execute_query(query, (class_id,), fetch=True)
 
     status_vars = []
-    form_frame = tk.Frame(window)
-    form_frame.pack(padx=20, pady=10, fill="x")
-
     if students_data:
         for index, (student_id, name, class_id) in enumerate(students_data):
-            tk.Label(form_frame, text=name, anchor="w", width=25).grid(row=index, column=0, sticky="w", pady=4)
+            tk.Label(scrollable_frame, text=f"{index+1}. {name}", anchor="w", width=30).grid(row=index, column=0, sticky="w", pady=5, padx=5)
             status_var = tk.StringVar(value="Có mặt")
             status_vars.append((student_id, class_id, status_var))
-            ttk.Combobox(form_frame, textvariable=status_var, values=["Có mặt", "Vắng mặt", "Muộn", "Có phép"], state="readonly", width=18).grid(row=index, column=1, padx=10)
+            ttk.Combobox(scrollable_frame, textvariable=status_var, values=["Có mặt", "Vắng mặt", "Muộn", "Có phép"], state="readonly", width=15).grid(row=index, column=1, padx=5)
 
     def save_teacher_attendance():
         for student_id, class_id, status_var in status_vars:
@@ -1155,15 +1031,47 @@ def open_teacher_attendance():
             """
             execute_query(query, (student_id, class_id, status, current_user["user_id"]))
 
-        messagebox.showinfo("Thông báo", "Điểm danh của giáo viên đã được lưu!", parent=window)
+        messagebox.showinfo("Thành công", f"Đã lưu điểm danh cho lớp {class_name}", parent=window)
+        if on_save_callback: on_save_callback()
+        window.destroy()
 
     tk.Button(window, text="Lưu điểm danh", bg="lightgreen", font=("Arial", 12, "bold"), command=save_teacher_attendance).pack(pady=12)
 
+def open_teacher_self_attendance_config(class_id, class_name):
+    window = create_window(f"Cấu hình tự điểm danh - {class_name}", "380x420", True)
+    tk.Label(window, text=f"MỞ TỰ ĐIỂM DANH: {class_name}", font=("Arial", 12, "bold")).pack(pady=10)
+    
+    ent_date = ui_label_entry(window, "Ngày cho phép (YYYY-MM-DD):")
+    ent_date.insert(0, datetime.now().strftime('%Y-%m-%d'))
+    
+    ent_start = ui_label_entry(window, "Giờ bắt đầu (HH:MM:SS):")
+    ent_start.insert(0, "07:00:00")
+    
+    ent_end = ui_label_entry(window, "Giờ kết thúc (HH:MM:SS):")
+    ent_end.insert(0, "17:00:00")
+    
+    def save_config():
+        d, s, e = ent_date.get().strip(), ent_start.get().strip(), ent_end.get().strip()
+        try:
+            datetime.strptime(d, '%Y-%m-%d')
+            datetime.strptime(s, '%H:%M:%S')
+            datetime.strptime(e, '%H:%M:%S')
+        except ValueError:
+            messagebox.showerror("Lỗi", "Định dạng ngày hoặc giờ không hợp lệ!", parent=window)
+            return
+
+        query = """
+            INSERT INTO self_attendance_configs (class_id, auth_date, start_time, end_time)
+            VALUES (%s, %s, %s, %s) ON DUPLICATE KEY UPDATE start_time=VALUES(start_time), end_time=VALUES(end_time)
+        """
+        execute_query(query, (class_id, d, s, e))
+        messagebox.showinfo("Thành công", f"Đã mở quyền tự điểm danh cho lớp {class_name}!", parent=window)
+        window.destroy()
+
+    tk.Button(window, text="Lưu cấu hình", bg="#fff3cd", font=("Arial", 10, "bold"), command=save_config).pack(pady=20)
+
 def open_teacher_export_report():
-    window = tk.Toplevel()
-    window.title("Xuất báo cáo")
-    window.geometry("520x280")
-    tk.Label(window, text="XUẤT BÁO CÁO", font=("Arial", 16, "bold")).pack(pady=12)
+    window = create_window("Xuất báo cáo", "520x280")
 
     tk.Label(window, text="Chọn loại báo cáo:").pack(anchor="w", padx=20)
     report_var = tk.StringVar()
@@ -1181,41 +1089,59 @@ def open_teacher_export_report():
     tk.Button(window, text="Xuất báo cáo", width=18, bg="lightblue", font=("Arial", 12, "bold"), command=export_report).pack(pady=14)
 
 def open_teacher_dashboard():
-    window = tk.Toplevel()
-    window.title("Teacher Dashboard")
-    window.geometry("900x600")
+    window = create_window("Teacher Dashboard", "900x650")
+    header_lbl = tk.Label(window, text="GIÁO VIÊN - QUẢN LÝ ĐIỂM DANH", font=("Arial", 18, "bold"))
+    header_lbl.pack(pady=10)
 
-    tk.Label(window, text="GIÁO VIÊN - ĐIỂM DANH HỌC SINH", font=("Arial", 18, "bold")).pack(pady=10)
+    current_selection = {"id": None, "name": ""}
 
     menu_frame = tk.Frame(window)
     menu_frame.pack(pady=10)
 
-    tk.Button(menu_frame, text="Danh sách lớp", width=20, command=open_teacher_class_list).grid(row=0, column=0, padx=5)
-    tk.Button(menu_frame, text="Điểm danh", width=20, command=open_teacher_attendance).grid(row=0, column=1, padx=5)
-    tk.Button(menu_frame, text="Xuất báo cáo", width=20, command=open_teacher_export_report).grid(row=0, column=2, padx=5)
+    def refresh_dashboard_list():
+        if not current_selection["id"]: return
+        for item in tree.get_children():
+            tree.delete(item)
+        query = """
+            SELECT s.student_code, u.full_name, COALESCE(a.status, 'Chưa điểm danh')
+            FROM students s
+            JOIN users u ON s.user_id = u.user_id
+            LEFT JOIN attendance a ON s.student_id = a.student_id AND DATE(a.attendance_date) = CURDATE()
+            WHERE s.class_id = %s
+            ORDER BY u.full_name
+        """
+        students = execute_query(query, (current_selection["id"],), fetch=True)
+        if students:
+            for s in students: tree.insert("", tk.END, values=s)
 
-    columns = ("Mã HS", "Họ tên", "Trạng thái")
-    tree = ttk.Treeview(window, columns=columns, show="headings", height=12)
+    def on_class_picked(c_id, c_name):
+        current_selection["id"] = c_id
+        current_selection["name"] = c_name
+        header_lbl.config(text=f"LỚP ĐANG CHỌN: {c_name}")
+        btn_attendance.config(state="normal", bg="#d4edda")
+        btn_self_config.config(state="normal", bg="#fff3cd")
+        refresh_dashboard_list()
 
-    for col in columns:
-        tree.heading(col, text=col)
-        tree.column(col, width=200)
+    def start_attendance():
+        open_teacher_attendance(current_selection["id"], current_selection["name"], refresh_dashboard_list)
 
-    tree.pack(pady=20)
+    def start_self_config():
+        open_teacher_self_attendance_config(current_selection["id"], current_selection["name"])
 
-    # Lấy danh sách học sinh từ database
-    query = """
-    SELECT s.student_code, u.full_name, COALESCE(a.status, 'Chưa điểm danh')
-    FROM students s
-    JOIN users u ON s.user_id = u.user_id
-    LEFT JOIN attendance a ON s.student_id = a.student_id AND DATE(a.attendance_date) = CURDATE()
-    LIMIT 20
-    """
-    students = execute_query(query, fetch=True)
+    m_items = [
+        ("Chọn lớp", lambda: open_teacher_class_list(on_class_picked)),
+        ("Xuất báo cáo", open_teacher_export_report)
+    ]
+    for idx, (t, c) in enumerate(m_items):
+        tk.Button(menu_frame, text=t, width=20, command=c).grid(row=0, column=idx, padx=5)
 
-    if students:
-        for s in students:
-            tree.insert("", tk.END, values=s)
+    btn_attendance = tk.Button(menu_frame, text="Điểm danh", width=20, state="disabled", command=start_attendance)
+    btn_attendance.grid(row=0, column=2, padx=5)
+
+    btn_self_config = tk.Button(menu_frame, text="Cài đặt tự điểm danh", width=20, state="disabled", command=start_self_config)
+    btn_self_config.grid(row=0, column=3, padx=5)
+
+    tree = ui_treeview(window, ("Mã HS", "Họ tên", "Trạng thái"), {}) # Đảm bảo khớp với 3 cột từ query
 
     tk.Button(window, text="Đăng xuất", width=20, bg="#f8d7da", command=lambda: common_logout(window)).pack(pady=10)
 
@@ -1223,14 +1149,10 @@ def open_teacher_dashboard():
 
 # ===================== STUDENT =====================
 
-def open_self_attendance():
-    window = tk.Toplevel()
-    window.title("Tự điểm danh")
-    window.geometry("520x320")
-
+def open_self_attendance(auth_date, start_time, end_time, on_save_callback):
+    window = create_window("Tự điểm danh", "520x340", True)
     tk.Label(window, text="TỰ ĐIỂM DANH", font=("Arial", 16, "bold")).pack(pady=12)
 
-    # Lấy thông tin học sinh
     query = """
     SELECT u.full_name, c.class_name, s.student_id, s.class_id
     FROM students s
@@ -1242,8 +1164,10 @@ def open_self_attendance():
 
     if student_info:
         full_name, class_name, student_id, class_id = student_info[0]
-        tk.Label(window, text=f"Học sinh: {full_name}").pack(anchor="w", padx=20)
-        tk.Label(window, text=f"Lớp: {class_name}").pack(anchor="w", padx=20, pady=(0, 15))
+
+        tk.Label(window, text=f"Học sinh: {full_name}", font=("Arial", 10)).pack(anchor="w", padx=20)
+        tk.Label(window, text=f"Lớp: {class_name}").pack(anchor="w", padx=20)
+        tk.Label(window, text=f"Khung giờ: {auth_date} ({start_time} - {end_time})", fg="blue").pack(anchor="w", padx=20, pady=(5, 15))
 
         tk.Label(window, text="Trạng thái điểm danh:").pack(anchor="w", padx=20)
         status_var = tk.StringVar(value="Có mặt")
@@ -1253,13 +1177,14 @@ def open_self_attendance():
             status = status_var.get()
             query = """
             INSERT INTO attendance (student_id, class_id, attendance_date, status, recorded_by)
-            VALUES (%s, %s, CURDATE(), %s, %s)
+            VALUES (%s, %s, %s, %s, %s)
             ON DUPLICATE KEY UPDATE status = VALUES(status)
             """
-            result = execute_query(query, (student_id, class_id, status, current_user["user_id"]))
+            result = execute_query(query, (student_id, class_id, auth_date, status, current_user["user_id"]))
 
             if result:
                 messagebox.showinfo("Thông báo", f"Bạn đã điểm danh: {status}", parent=window)
+                if on_save_callback: on_save_callback()
                 window.destroy()
             else:
                 messagebox.showerror("Lỗi", "Điểm danh thất bại!", parent=window)
@@ -1267,14 +1192,17 @@ def open_self_attendance():
         tk.Button(window, text="Gửi điểm danh", width=18, bg="lightgreen", font=("Arial", 12, "bold"), command=save_self_attendance).pack(pady=14)
 
 def open_student_dashboard():
-    window = tk.Toplevel()
-    window.title("Student Dashboard")
-    window.geometry("700x520")
-
+    window = create_window("Student Dashboard", "700x520")
     tk.Label(window, text="THÔNG TIN ĐIỂM DANH", font=("Arial", 18, "bold")).pack(pady=15)
 
     info_frame = tk.Frame(window)
     info_frame.pack(pady=10)
+
+    if not current_user or "user_id" not in current_user:
+        messagebox.showerror("Lỗi", "Thông tin người dùng không hợp lệ. Vui lòng đăng nhập lại.", parent=window)
+        window.destroy()
+        return
+
 
     # Lấy thông tin học sinh từ database
     query = """
@@ -1291,32 +1219,65 @@ def open_student_dashboard():
         tk.Label(info_frame, text=f"Mã HS: {student_code}").pack(anchor="w")
         tk.Label(info_frame, text=f"Họ tên: {full_name}").pack(anchor="w")
         tk.Label(info_frame, text=f"Lớp: {class_name}").pack(anchor="w")
+    else:
+        messagebox.showwarning("Thông báo", "Không tìm thấy thông tin học sinh của tài khoản này. Vui lòng liên hệ quản trị viên.", parent=window)
+        # Tiếp tục tải lịch điểm danh, có thể sẽ trống nếu không có thông tin học sinh.
 
-    columns = ("Ngày", "Trạng thái")
-    tree = ttk.Treeview(window, columns=columns, show="headings")
-
-    for col in columns:
-        tree.heading(col, text=col)
-        tree.column(col, width=250)
-
+    # Cập nhật các cột hiển thị: Ngày, Giờ bắt đầu, Giờ kết thúc, Trạng thái
+    tree = ui_treeview(window, ("Ngày", "Bắt đầu", "Kết thúc", "Trạng thái"),
+                       {"Ngày": 100, "Bắt đầu": 100, "Kết thúc": 100, "Trạng thái": 120})
     tree.pack(pady=20)
 
-    # Lấy lịch sử điểm danh từ database
-    query = """
-    SELECT a.attendance_date, a.status
-    FROM attendance a
-    JOIN students s ON a.student_id = s.student_id
-    WHERE s.user_id = %s
-    ORDER BY a.attendance_date DESC
-    LIMIT 20
-    """
-    history = execute_query(query, (current_user["user_id"],), fetch=True)
+    def load_attendance_slots():
+        """Tải các khung giờ giáo viên đã mở kèm trạng thái của học sinh hiện tại."""
+        for item in tree.get_children():
+            tree.delete(item)
+            
+        if not current_user or "user_id" not in current_user:
+            messagebox.showerror("Lỗi", "Thông tin người dùng không hợp lệ khi tải lịch điểm danh.", parent=window)
+            return
 
-    if history:
-        for item in history:
-            tree.insert("", tk.END, values=item)
 
-    tk.Button(window, text="Tự điểm danh", width=20, command=open_self_attendance).pack(pady=10)
+        query = """
+        SELECT DATE_FORMAT(conf.auth_date, %s), 
+               TIME_FORMAT(conf.start_time, %s), 
+               TIME_FORMAT(conf.end_time, %s), 
+               COALESCE(att.status, 'Chưa điểm danh')
+        FROM self_attendance_configs conf
+        JOIN students s ON s.class_id = conf.class_id
+        LEFT JOIN attendance att ON att.student_id = s.student_id AND att.attendance_date = conf.auth_date
+        WHERE s.user_id = %s
+        ORDER BY conf.auth_date DESC, conf.start_time DESC
+        """
+        slots = execute_query(query, ('%Y-%m-%d', '%H:%i:%s', '%H:%i:%s', current_user["user_id"]), fetch=True)
+        if slots:
+            for item in slots:
+                tree.insert("", tk.END, values=item)
+
+    load_attendance_slots()
+
+    def handle_self_attendance():
+        selected = tree.selection()
+        if not selected:
+            messagebox.showwarning("Thông báo", "Vui lòng chọn một ngày/giờ cần điểm danh trong danh sách!")
+            return
+        
+        # Lấy dữ liệu của dòng đang chọn
+        auth_date, start_str, end_str, status = tree.item(selected[0], 'values')
+        
+        # Kiểm tra thời điểm hiện tại
+        now = datetime.now()
+        curr_d = now.strftime('%Y-%m-%d')
+        curr_t = now.strftime('%H:%M:%S')
+
+        # Logic: Phải đúng ngày giáo viên mở và nằm trong khoảng giờ bắt đầu - kết thúc
+        if str(auth_date) == curr_d and str(start_str) <= curr_t <= str(end_str):
+            open_self_attendance(auth_date, start_str, end_str, load_attendance_slots)
+        else:
+            messagebox.showwarning("Ngoài khung giờ", 
+                                f"Bạn chỉ được phép tự điểm danh vào:\nNgày: {auth_date}\nGiờ: {start_str} - {end_str}\n\nHiện tại là: {curr_d} {curr_t}")
+
+    tk.Button(window, text="Tự điểm danh", width=20, bg="#d4edda", font=("Arial", 10, "bold"), command=handle_self_attendance).pack(pady=10)
 
     tk.Button(window, text="Đăng xuất", width=20, bg="#f8d7da", command=lambda: common_logout(window)).pack(pady=5)
 
@@ -1330,24 +1291,22 @@ login_window.geometry("450x400")
 
 tk.Label(login_window, text="HỆ THỐNG ĐIỂM DANH HỌC SINH", font=("Arial", 16, "bold")).pack(pady=20)
 
-tk.Label(login_window, text="Tên đăng nhập").pack()
-entry_username = tk.Entry(login_window, width=30)
-entry_username.pack(pady=5)
-
-tk.Label(login_window, text="Mật khẩu").pack()
-entry_password = tk.Entry(login_window, width=30, show="*")
-entry_password.pack(pady=5)
+entry_username = ui_label_entry(login_window, "Tên đăng nhập")
+entry_password = ui_label_entry(login_window, "Mật khẩu", show="*")
 
 tk.Label(login_window, text="Vai trò").pack(pady=(10, 0))
 role_var = tk.StringVar()
 ttk.Combobox(
     login_window,
     textvariable=role_var,
-    values=["Quản trị viên", "Giáo viên", "Học sinh"],
+    values=["Quản lý", "Giáo viên", "Học sinh"],
     state="readonly",
     width=27
 ).pack()
 
 tk.Button(login_window, text="Đăng nhập", width=20, bg="lightblue", font=("Arial", 11), command=login).pack(pady=12)
 
-login_window.mainloop()
+if check_schema_ready():
+    login_window.mainloop()
+else:
+    login_window.destroy()
